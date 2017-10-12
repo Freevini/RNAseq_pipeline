@@ -1,0 +1,17 @@
+Bowtie2/                                                                                                                
+Bowtie2bigwig/                                                                                                                                                                                                                                                         
+Bowtie2index/
+FASTQ/
+FASTQtrimmed/
+FastQC/
+Log.out
+MultiQC/
+Rout/
+STAR/
+STARindex/
+SortmeRNA/
+diagnosticPlots/
+metadata.txt
+output/
+reference/
+salmon/
