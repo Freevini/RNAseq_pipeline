@@ -1,0 +1,211 @@
+---
+title: "KEGG/GO analysis"
+output:
+  html_notebook: default
+  html_document: default
+---
+
+!!!change before running script:
+1. name of organism in following chunk "convertKEGG_geneSymbol"
+
+Here, we want to analyse the differentially expressed genes for differences in the KEGG and GO pathways
+
+First we load all necessary libraries
+```{r libraries}
+.libPaths("/home/bioinf/bioinf_data/43_sovi/R/")
+
+suppressPackageStartupMessages(library("KEGGREST"))
+suppressPackageStartupMessages(library("GSA"))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(tidyr))
+suppressPackageStartupMessages(library(limma))
+suppressPackageStartupMessages(library(edgeR))
+suppressPackageStartupMessages(library(rtracklayer))
+suppressPackageStartupMessages(library(reshape2))
+suppressPackageStartupMessages(library("doParallel"))
+suppressPackageStartupMessages(library(tximport))
+
+
+```
+
+Importing the .gmt files which were downloaded from the MsigDB homepage for the KEGG aswell as the GO analysis pathway. 
+```{r gmtImport, echo=FALSE}
+
+GO_gene_symbols <- GSA.read.gmt("../annotations/GO_All_c5.all.v6.0.symbols.gmt")
+KEGG_gene_symbols <- GSA.read.gmt("../annotations/KEGG_c2.cp.kegg.v6.0.symbols.gmt")
+
+
+
+
+
+```
+
+Importing the RNAseq results
+```{r importing_RNASeq}
+tx2gene <- "/home/bioinf/bioinf_data/43_sovi/Projects/Metagenomics_pipeline/Model_data/e_coli/rnaseqworkflow-master/reference/Escherichia_coli_o157_h7_str_sakai.ASM886v1.cdna.ncrna_tx2gene.rds"
+edgerres='/home/bioinf/bioinf_data/43_sovi/Projects/Metagenomics_pipeline/Model_data/e_coli/rnaseqworkflow-master/output/edgeR_dge.rds'
+salmondir <- "/home/bioinf/bioinf_data/43_sovi/Projects/Metagenomics_pipeline/Model_data/e_coli/rnaseqworkflow-master/salmon"
+metafile <- "/home/bioinf/bioinf_data/43_sovi/Projects/Metagenomics_pipeline/Model_data/e_coli/rnaseqworkflow-master/metadata.txt"
+
+edgerres <- readRDS(edgerres)
+tx2gene <- readRDS(tx2gene)
+
+## Read metadata and reorder in the same order as the count matrix
+metadata <- read.delim(metafile, header = TRUE, as.is = TRUE, sep = "\t")
+(des <- model.matrix(~ time, data = metadata))
+
+
+```
+
+Convert KEGG_name into Genesysmbol
+```{r convertKEGG_geneSymbol}
+
+query_symbol_par <- rep("NA",times=length(edgerres$results$a2vsa5$symbol))
+
+library("doParallel")
+registerDoParallel(cores=15)
+
+query_symbol_par <- foreach(i=1:length(edgerres$results$a2vsa5$symbol)) %dopar% {
+    #print(i)
+  tryCatch({
+    query <- keggGet(paste("ecs:",edgerres$results$a2vsa5$symbol[i],sep = ""))
+  },error=function(e){})
+  
+  tryCatch({
+   query_symbol_par[i] <- query[[1]]$NAME
+  },error=function(e){})
+}
+
+##create a vector with KEGGNames
+query_symbol <- rep("NA",times=length(edgerres$results$a2vsa5$symbol))
+for(i in 1:length(edgerres$results$a2vsa5$symbol)){
+  
+  if(!is.null(query_symbol_par[[i]])){query_symbol[i]<-query_symbol_par[[i]]}
+  
+}
+names(query_symbol) <- edgerres$results$a2vsa5$symbol
+
+```
+
+
+Prepare KEGG analysis
+```{r GSEA_KEGG_prep}
+
+for(i in 1:length(KEGG_gene_symbols$geneset.names)){
+  num_01<-num_01+1
+  num<-0
+  num_02 <-0
+  for(k in 1:length(KEGG_gene_symbols$genesets[[i]])){
+    if(sum(grepl(pattern=KEGG_gene_symbols$genesets[[i]][k],x=query_symbol,ignore.case = TRUE))!=0){
+      num<-num+1
+      KEGG_gene_symbols$genesets[[i]][k] <- grep(KEGG_gene_symbols$genesets[[i]][k],query_symbol,ignore.case = TRUE)
+    }
+    else{
+      KEGG_gene_symbols$genesets[[i]][k] <- NA
+    }
+  }
+}
+
+omit_kegg_list <- lapply(KEGG_gene_symbols$genesets,function(x) x[!is.na(x)])
+names(omit_kegg_list) <- KEGG_gene_symbols$geneset.names
+omit_kegg_list <- omit_kegg_list[lapply(omit_kegg_list,length)>0]
+
+```
+
+##KEGG analysis
+now we want to see which KEGG pathways are overrepresented
+```{r GSEA_KEGG}
+design <- cbind(Intercept=1,Group=c(0,1,0,1,0,1))
+rownames(edgerres$data$counts) <- 1:length(rownames(edgerres$data$counts))
+
+diff_KEGG <- camera(edgerres$data$counts,omit_kegg_list,design = design)
+#View(diff_KEGG)
+
+hist(diff_KEGG$PValue)
+head(diff_KEGG)
+```
+
+##Scater plots
+create scater plots for diagnostic purposes
+```{r scater_prep}
+
+##=============
+##creating AnnotatedDataFrame which is a metadata/phenotype file
+##=============
+df <- data.frame(x=metadata$time,
+                 row.names=metadata$ID)
+metaData <-
+  data.frame(labelDescription=c(
+               "time"))
+
+AnnotatedDataFrame()
+AnnotatedDataFrame(data=df)
+AnnotatedDataFrame(data=df, varMetadata=metaData)
+as(df, "AnnotatedDataFrame")
+
+obj <- AnnotatedDataFrame()
+pData(obj) <- df
+varMetadata(obj) <- metaData
+validObject(obj)
+
+##=============
+##creating scater file
+##=============
+
+example_sceset <- newSCESet(countData = edgerres$data$counts, phenoData = obj)
+example2 <- newSCESet(exprsData = log2(calculateCPM(example_sceset) + 1))
+
+print("expression data")
+exprs(example2)[1:3, 1:6]
+
+print("count data")
+exprs(example2)[1:3, 1:6]
+```
+
+##cummulative expression plot
+This method plots the cumulative proportion of each cell’s library that is accounted for by the top highest-expressed features.
+This plot gives an idea if the samples have entirely different expression distributions.
+ 
+```{r cumulative_ expression_plot}
+
+plot(example_sceset, exprs_values = "counts")
+##add blocks if certain metadata can be added
+
+
+
+dat <- (log10(calculateCPM(example_sceset) + 1))
+dat2 <- melt(dat,id.vars="row")
+ggplot(dat2, aes(x=Var2, y=value))+geom_boxplot()+
+guides(fill=FALSE)+
+  scale_y_continuous(name="log10(Cpm)+1")+
+  labs(title="boxplot of expressions of different samples")
+
+```
+
+##Exression plots
+```{r ExprPlots}
+plotExpression(example_sceset, rownames(example_sceset)[1:6],x = "x", exprs_values = "exprs")
+
+```
+
+##Quality control
+```{r QCplots}
+
+example_sceset <- calculateQCMetrics(example_sceset)
+varLabels(example_sceset)
+
+keep_feature <- rowSums(counts(example_sceset) > 0) > 4
+example_sceset <- example_sceset[keep_feature,]
+## Plot QC
+plotQC(example_sceset, type = "highest-expression", exprs_values = "counts")
+
+plotQC(example_sceset, type = "exprs-freq-vs-mean")
+
+plotFeatureData(example_sceset, aes(x = n_cells_exprs, y = pct_total_counts))
+
+example_sceset_pca <- plotPCA(example_sceset, pca_data_input = "pdata", 
+                          detect_outliers = TRUE, return_SCESet = TRUE)
+
+plotPCA(example_sceset, exprs_values = "counts",colour_by = "x")
+```
+
